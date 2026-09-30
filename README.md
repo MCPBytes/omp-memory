@@ -32,6 +32,8 @@ Create the key in the [MCPBytes console](https://console.mcpbytes.com) (API keys
 key can also come from the environment (`MCPBYTES_API_KEY`); a stored setting wins over it. Without a key, or with one
 the API refuses, the plugin says so once and stays off.
 
+`omp plugin install` installs packages with [Bun](https://bun.sh), so `bun` must be on your PATH.
+
 To update, install the version you want (`omp plugin install @mcpbytes/omp-memory@<version>`); to remove it,
 `omp plugin uninstall @mcpbytes/omp-memory`. Tested with omp 18.4.
 
