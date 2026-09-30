@@ -1,0 +1,61 @@
+{
+  "name": "@mcpbytes/omp-memory",
+  "version": "0.1.0",
+  "description": "MCPBytes Memory for omp: recalls the user's memories at the start of a session and saves durable decisions to a per-project space.",
+  "keywords": ["omp", "oh-my-pi", "omp-plugin", "mcpbytes", "memory", "coding-agent"],
+  "homepage": "https://github.com/MCPBytes/omp-memory#readme",
+  "bugs": "https://github.com/MCPBytes/omp-memory/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MCPBytes/omp-memory.git"
+  },
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "files": ["src"],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --no-warnings --test test/*.test.ts",
+    "typecheck": "tsc"
+  },
+  "devDependencies": {
+    "@oh-my-pi/pi-coding-agent": "^18.4.4",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.0"
+  },
+  "omp": {
+    "extensions": ["./src/index.ts"],
+    "settings": {
+      "apiKey": {
+        "type": "string",
+        "secret": true,
+        "env": "MCPBYTES_API_KEY",
+        "description": "MCPBytes API key (console.mcpbytes.com, API keys). Without one the plugin stays off."
+      },
+      "apiUrl": {
+        "type": "string",
+        "default": "https://api.mcpbytes.com",
+        "env": "MCPBYTES_API_URL",
+        "description": "API base URL"
+      },
+      "space": {
+        "type": "string",
+        "env": "MCPBYTES_MEMORY_SPACE",
+        "description": "Memory space for this project. Default: the repository's name. Set it per project in .omp/plugin-overrides.json"
+      },
+      "autoRecall": {
+        "type": "boolean",
+        "default": true,
+        "env": "MCPBYTES_MEMORY_AUTO_RECALL",
+        "description": "Recall relevant memories and due intentions for the first request of a session (charged only when a match by meaning is found)"
+      },
+      "retainNudge": {
+        "type": "boolean",
+        "default": true,
+        "env": "MCPBYTES_MEMORY_RETAIN_NUDGE",
+        "description": "After a run of 5 or more tool calls that saved nothing, ask the agent once whether something is worth remembering"
+      }
+    }
+  }
+}
