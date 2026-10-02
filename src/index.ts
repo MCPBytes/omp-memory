@@ -3,20 +3,22 @@
  * behaviour through the extension API instead:
  *
  * - a session starts with one free call that checks the key can use Memory; when it cannot (a refused key, an account
- *   without Memory), the plugin says why once and stays off;
+ *   without Memory), cloud memory says why once and stays off; local history is independent;
  * - the first request of a session is sent with the due intentions and the memories that match it (this project's
  *   space, then `default`), as an `<mcpbytes_memory>` message; standing instructions ride on every system prompt;
  * - `memory_recall` and `memory_retain` read and write that space (the MCPBytes MCP server, when also configured,
  *   still offers revise, forget and resolve);
  * - a stop after real work that saved nothing is continued once with a reminder to save what matters (like the
  *   automatic retention of omp's own backends, but the agent decides what is kept);
- * - `/mcpbytes-memory` shows the account's memory status and prices, or runs a free word search.
+ * - `/mcpbytes-memory` shows the account's memory status and prices, or runs a free word search;
+ * - opt-in local activity history captures main/subagent evidence for a fixed 30 days, with optional compact cloud indexing.
  *
  * Main sessions only: subagents get the tools when they ask for them, but no recall, instructions or reminder.
  */
 import { basename, dirname } from "node:path";
 import type { ExtensionAPI, ExtensionContext, zod } from "@oh-my-pi/pi-coding-agent";
 import { type Access, checkAccess, describeError, type MemoryApi, memoryApi } from "./api.ts";
+import { registerActivityHistory } from "./history-runtime.ts";
 import {
   guidance,
   isRetainTool,
@@ -38,7 +40,7 @@ import {
   spaceName,
 } from "./core.ts";
 
-const NOT_CONFIGURED = `MCPBytes memory is off: no API key. Create one at https://console.mcpbytes.com (API keys), then run \`omp plugin config set ${PLUGIN} apiKey <key>\` or set MCPBYTES_API_KEY.`;
+const NOT_CONFIGURED = `Cloud MCPBytes memory is off: no API key. Local activity history can still run. Create a key at https://console.mcpbytes.com (API keys), then run \`omp plugin config set ${PLUGIN} apiKey <key>\` or set MCPBYTES_API_KEY.`;
 
 type SessionState = {
   settings: Settings;
@@ -61,16 +63,21 @@ export default function mcpbytesMemory(pi: ExtensionAPI): void {
       .array(
         z.object({
           text: z.string().describe("One self-contained sentence, in your own words"),
-          kind: z.enum(["fact", "decision", "preference", "episode", "intention"]).optional().describe("Default fact; intention needs due_at"),
+          kind: z
+            .enum(["fact", "decision", "preference", "episode", "intention"])
+            .optional()
+            .describe("Default fact; intention needs due_at"),
           global: z.boolean().optional().describe("Save to default, which every project recalls (the user's preferences)"),
           source: z.string().optional().describe("File path, commit or URL where it can be checked"),
           due_at: z.string().optional().describe("Intentions only: when to bring it up, ISO 8601, up to a year ahead"),
+          expires_at: z.string().optional().describe("Fixed expiration, ISO 8601, 1 minute to 1 year ahead; reads do not extend it"),
         }),
       )
       .min(1)
       .max(8),
   });
   const sessions = new Map<string, Promise<SessionState>>();
+  const configurations = new Map<string, Promise<{ settings: Settings; space: string }>>();
   let warned = false;
   // Since the last stop: tool calls that ran, and whether one of them saved to memory.
   let toolCalls = 0;
@@ -97,15 +104,31 @@ export default function mcpbytesMemory(pi: ExtensionAPI): void {
     return basename(top.code === 0 && top.stdout.trim() ? top.stdout.trim() : cwd);
   }
 
+  function configuration(ctx: ExtensionContext): Promise<{ settings: Settings; space: string }> {
+    const id = ctx.sessionManager.getSessionId();
+    let pending = configurations.get(id);
+    if (!pending) {
+      const cwd = ctx.cwd;
+      pending = (async () => {
+        const settings = resolveSettings(await storedSettings(cwd), process.env);
+        return { settings, space: spaceName(settings.space || (await repositoryName(cwd))) };
+      })();
+      configurations.set(id, pending);
+    }
+    return pending;
+  }
+
+  const history = registerActivityHistory(pi, configuration, () => {
+    configurations.clear();
+    sessions.clear();
+    warned = false;
+  });
+
   async function prepare(ctx: ExtensionContext): Promise<SessionState> {
-    const settings = resolveSettings(await storedSettings(ctx.cwd), process.env);
+    const { settings, space } = await configuration(ctx);
     const recallDone = ctx.sessionManager.getBranch().some((entry) => entry.type === "custom_message" && entry.customType === MESSAGE_TYPE);
-    // Independent lookups, so at once: whether the key can use Memory, and the repository that names the space.
-    const [access, name] = await Promise.all([
-      settings.apiKey ? checkAccess(memoryApi(settings)) : Promise.resolve<Access>({ api: null, off: NOT_CONFIGURED }),
-      settings.space || repositoryName(ctx.cwd),
-    ]);
-    return { settings, space: spaceName(name), recallDone, ...access };
+    const access: Access = settings.apiKey ? await checkAccess(memoryApi(settings)) : { api: null, off: NOT_CONFIGURED };
+    return { settings, space, recallDone, ...access };
   }
 
   function sessionState(ctx: ExtensionContext): Promise<SessionState> {
@@ -122,8 +145,15 @@ export default function mcpbytesMemory(pi: ExtensionAPI): void {
     const spaces = searchSpaces(space);
     const query = recallQuery(prompt);
     try {
-      const [due, found] = await Promise.all([api.due(spaces), query ? api.search({ query, spaces, limit: 8 }) : Promise.resolve({ results: [] })]);
-      return recallBlock(space, due.intentions, found.results);
+      const [due, found] = await Promise.all([
+        api.due(spaces),
+        query ? api.search({ query, spaces, limit: 8 }) : Promise.resolve({ results: [] }),
+      ]);
+      const block = recallBlock(space, due.intentions, found.results);
+      const evidence = await history.expand(ctx, found.results);
+      return block && evidence
+        ? `${block}\n<mcpbytes_activity_evidence>\n${evidence.replaceAll("<", "&lt;")}\n</mcpbytes_activity_evidence>`
+        : block;
     } catch (error) {
       // Memory must never block work: the request goes on without it.
       if (ctx.hasUI) ctx.ui.notify(`MCPBytes memory: recall failed (${describeError(error)})`, "warning");
@@ -144,8 +174,9 @@ export default function mcpbytesMemory(pi: ExtensionAPI): void {
   pi.on("before_agent_start", async (event, ctx) => {
     if (ctx.agent?.kind === "sub") return;
     const state = await sessionState(ctx);
-    if (state.api === null) return;
-    const systemPrompt = [...event.systemPrompt, guidance(state.space)];
+    const localGuidance = await history.guidance(ctx);
+    const systemPrompt = [...event.systemPrompt, ...(state.api ? [guidance(state.space)] : []), ...(localGuidance ? [localGuidance] : [])];
+    if (state.api === null) return localGuidance ? { systemPrompt } : undefined;
     if (!state.settings.autoRecall || state.recallDone) return { systemPrompt };
     // Handlers can run again for the same request (a policy retry): only a different prompt means the first one is past.
     if (state.recall && state.recall.prompt !== event.prompt) {
@@ -154,7 +185,9 @@ export default function mcpbytesMemory(pi: ExtensionAPI): void {
     }
     state.recall ??= { prompt: event.prompt, block: recall(state.api, state.space, event.prompt, ctx) };
     const block = await state.recall.block;
-    return block ? { systemPrompt, message: { customType: MESSAGE_TYPE, content: block, display: true, attribution: "agent" } } : { systemPrompt };
+    return block
+      ? { systemPrompt, message: { customType: MESSAGE_TYPE, content: block, display: true, attribution: "agent" } }
+      : { systemPrompt };
   });
 
   pi.on("tool_execution_end", async (event, ctx) => {
@@ -165,7 +198,12 @@ export default function mcpbytesMemory(pi: ExtensionAPI): void {
 
   pi.on("session_stop", async (event, ctx) => {
     const state = await sessionState(ctx);
-    const nudge = shouldNudge({ enabled: state.api !== null && state.settings.retainNudge, toolCalls, retained, stopHookActive: event.stop_hook_active });
+    const nudge = shouldNudge({
+      enabled: state.api !== null && state.settings.retainNudge,
+      toolCalls,
+      retained,
+      stopHookActive: event.stop_hook_active,
+    });
     toolCalls = 0;
     retained = false;
     return nudge ? { continue: true, additionalContext: NUDGE } : undefined;
@@ -174,7 +212,8 @@ export default function mcpbytesMemory(pi: ExtensionAPI): void {
   pi.registerTool({
     name: RECALL_TOOL,
     label: "Recall memory",
-    description: "Search the user's MCPBytes memory (this project's space, then default) by meaning and by words. Returns up to 8 memories with a relevance score, or the closest near misses. A search by meaning is charged only when it returns a match; words: true is always free.",
+    description:
+      "Search the user's MCPBytes memory (this project's space, then default) by meaning and by words. Returns up to 8 memories with a relevance score, or the closest near misses. A search by meaning is charged only when it returns a match; words: true is always free.",
     parameters: recallParams,
     // Top-level like omp's own recall: the standing instructions name it, so it must not hide behind tool search.
     loadMode: "essential",
@@ -182,16 +221,33 @@ export default function mcpbytesMemory(pi: ExtensionAPI): void {
     // omp 18.4 infers `Static<>` only for ArkType/TypeBox schemas, so zod params are typed here.
     async execute(_toolCallId, params: zod.infer<typeof recallParams>, signal, _onUpdate, ctx) {
       const state = await sessionState(ctx);
-      if (state.api === null) return { content: [{ type: "text", text: state.off }], isError: true };
-      try {
-        const found = await state.api.search({ query: recallQuery(params.query), spaces: searchSpaces(state.space), mode: params.words ? "words" : "auto", limit: 8 }, signal);
+      if (state.api === null) {
+        const local = await history.search(ctx, params.query);
         return {
-          content: [{ type: "text", text: searchReport(found) }],
-          details: { results: found.results.length, charged: found.charged ?? 0 },
-          useless: !found.results.length && !found.near_misses?.length,
+          content: [{ type: "text", text: local ? `${state.off}\n${local.text}` : state.off }],
+          isError: !local,
+          useless: local ? local.matches === 0 : undefined,
+        };
+      }
+      try {
+        const found = await state.api.search(
+          { query: recallQuery(params.query), spaces: searchSpaces(state.space), mode: params.words ? "words" : "auto", limit: 8 },
+          signal,
+        );
+        const evidence = await history.expand(ctx, found.results);
+        const local = found.results.length ? null : await history.search(ctx, params.query);
+        return {
+          content: [{ type: "text", text: [searchReport(found), evidence, local?.text].filter(Boolean).join("\n\n") }],
+          details: { results: found.results.length, localResults: local?.matches ?? 0, charged: found.charged ?? 0 },
+          useless: !found.results.length && !found.near_misses?.length && !local?.matches,
         };
       } catch (error) {
-        return { content: [{ type: "text", text: `Recall failed: ${describeError(error)}` }], isError: true };
+        const local = await history.search(ctx, params.query);
+        return {
+          content: [{ type: "text", text: [`Cloud recall failed: ${describeError(error)}`, local?.text].filter(Boolean).join("\n") }],
+          isError: !local,
+          useless: local ? local.matches === 0 : undefined,
+        };
       }
     },
   });
@@ -199,7 +255,8 @@ export default function mcpbytesMemory(pi: ExtensionAPI): void {
   pi.registerTool({
     name: RETAIN_TOOL,
     label: "Save to memory",
-    description: "Save durable knowledge to the user's MCPBytes memory: this project's space, or default (every project) with global: true. For decisions and their reasons, constraints, fixes for recurring failures, the user's stated preferences. Each saved memory is charged. Credentials are refused. A space the user set to review holds the memory until they approve it.",
+    description:
+      "Save durable knowledge to the user's MCPBytes memory: this project's space, or default (every project) with global: true. For decisions and their reasons, constraints, fixes for recurring failures, the user's stated preferences. Each saved memory is charged. Credentials are refused. A space the user set to review holds the memory until they approve it.",
     parameters: retainParams,
     loadMode: "essential",
     // A paid write to the user's account: the approval mode decides whether it asks first.
@@ -219,6 +276,7 @@ export default function mcpbytesMemory(pi: ExtensionAPI): void {
               text: item.text,
               ...(item.source ? { source: item.source } : {}),
               ...(item.due_at ? { due_at: item.due_at } : {}),
+              ...(item.expires_at ? { expires_at: item.expires_at } : {}),
               request_key: requestKey(sessionId, space, item),
             },
             signal,
@@ -243,7 +301,9 @@ export default function mcpbytesMemory(pi: ExtensionAPI): void {
       else {
         try {
           if (subcommand === "search" && words.length) {
-            text = searchReport(await state.api.search({ query: recallQuery(words.join(" ")), spaces: searchSpaces(state.space), mode: "words", limit: 8 }));
+            text = searchReport(
+              await state.api.search({ query: recallQuery(words.join(" ")), spaces: searchSpaces(state.space), mode: "words", limit: 8 }),
+            );
           } else {
             const [status, catalog] = await Promise.all([state.api.status(), state.api.catalog()]);
             const spaces = status.spaces

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { checkAccess, memoryApi } from "../src/api.ts";
 
-const client = (fetchImpl: () => Promise<Response>) => memoryApi({ apiKey: "k", apiUrl: "https://api.example" }, fetchImpl as typeof fetch);
+const client = (fetchImpl: () => Promise<Response>) => memoryApi({ apiKey: "k", apiUrl: "https://api.example" }, fetchImpl);
 const respond = (status: number, body: unknown) => async () => Response.json(body, { status });
 
 test("a refused key or an account without Memory turns the plugin off; an unreachable API does not", async () => {
@@ -20,7 +20,10 @@ test("a refused key or an account without Memory turns the plugin off; an unreac
   assert.match(refused.off ?? "", /refused \(invalid_token: Invalid access token\)/);
 
   // Offline or failing: memory stays on, and each later call reports its own error.
-  for (const failing of [async () => Promise.reject(new TypeError("fetch failed")), respond(503, { error: { code: "unavailable", message: "try again" } })]) {
+  for (const failing of [
+    async () => Promise.reject(new TypeError("fetch failed")),
+    respond(503, { error: { code: "unavailable", message: "try again" } }),
+  ]) {
     const unknown = await checkAccess(client(failing));
     assert.equal(unknown.off, null);
     assert.ok(unknown.api);

@@ -11,10 +11,12 @@ const USER_AGENT = `mcpbytes-omp-memory/${pkg.version}`;
 export class MemoryApiError extends Error {
   readonly status: number;
   readonly code: string;
-  constructor(status: number, code: string, message: string) {
+  readonly retryAfterMs?: number;
+  constructor(status: number, code: string, message: string, retryAfterMs?: number) {
     super(message);
     this.status = status;
     this.code = code;
+    this.retryAfterMs = retryAfterMs;
   }
 }
 
@@ -38,6 +40,7 @@ export interface RememberRequest {
   text: string;
   source?: string;
   due_at?: string;
+  expires_at?: string;
   request_key: string;
 }
 
@@ -65,11 +68,14 @@ export type Access = { api: MemoryApi; off: null } | { api: null; off: string };
 /** `code: message` of a failure, safe to show the model and the user. */
 export function describeError(error: unknown): string {
   if (error instanceof MemoryApiError) return `${error.code}: ${error.message}`;
-  if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) return "timeout: MCPBytes did not answer in time";
+  if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError"))
+    return "timeout: MCPBytes did not answer in time";
   return `network_error: ${error instanceof Error ? error.message : String(error)}`;
 }
 
-export function memoryApi(settings: Pick<Settings, "apiKey" | "apiUrl">, fetchImpl: typeof fetch = fetch): MemoryApi {
+export type MemoryFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+export function memoryApi(settings: Pick<Settings, "apiKey" | "apiUrl">, fetchImpl: MemoryFetch = fetch): MemoryApi {
   async function call<T>(method: "GET" | "POST", path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
     const timeout = AbortSignal.timeout(TIMEOUT_MS);
     const response = await fetchImpl(settings.apiUrl + path, {
@@ -82,14 +88,24 @@ export function memoryApi(settings: Pick<Settings, "apiKey" | "apiUrl">, fetchIm
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
     });
-    const payload = (await response.json().catch(() => null)) as { error?: string | { code?: string; message?: string }; error_description?: string } | null;
+    const payload = (await response.json().catch(() => null)) as {
+      error?: string | { code?: string; message?: string };
+      error_description?: string;
+    } | null;
     if (!response.ok) {
       // Two shapes: the API's { error: { code, message } }, and the sign-in layer's { error, error_description } for a
       // key it refuses.
       const error = payload?.error;
       const code = typeof error === "string" ? error : error?.code;
       const message = typeof error === "string" ? payload?.error_description : error?.message;
-      throw new MemoryApiError(response.status, code ?? `http_${response.status}`, message ?? response.statusText);
+      const retry = response.headers.get("retry-after");
+      const delay = retry === null ? undefined : /^\d+(\.\d+)?$/.test(retry) ? Number(retry) * 1000 : Date.parse(retry) - Date.now();
+      throw new MemoryApiError(
+        response.status,
+        code ?? `http_${response.status}`,
+        message ?? response.statusText,
+        delay !== undefined && Number.isFinite(delay) ? Math.max(0, delay) : undefined,
+      );
     }
     return payload as T;
   }

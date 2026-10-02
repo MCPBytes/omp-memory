@@ -1,8 +1,15 @@
 {
   "name": "@mcpbytes/omp-memory",
-  "version": "0.1.0",
-  "description": "MCPBytes Memory for omp: recalls the user's memories at the start of a session and saves durable decisions to a per-project space.",
-  "keywords": ["omp", "oh-my-pi", "omp-plugin", "mcpbytes", "memory", "coding-agent"],
+  "version": "0.2.0",
+  "description": "MCPBytes Memory for omp: durable decisions and opt-in, local 30-day activity history with evidence-backed recall.",
+  "keywords": [
+    "omp",
+    "oh-my-pi",
+    "omp-plugin",
+    "mcpbytes",
+    "memory",
+    "coding-agent"
+  ],
   "homepage": "https://github.com/MCPBytes/omp-memory#readme",
   "bugs": "https://github.com/MCPBytes/omp-memory/issues",
   "repository": {
@@ -11,27 +18,36 @@
   },
   "license": "AGPL-3.0-only",
   "type": "module",
-  "files": ["src"],
+  "files": [
+    "src"
+  ],
   "publishConfig": {
     "access": "public"
   },
+  "engines": {
+    "bun": ">=1.3.0"
+  },
   "scripts": {
-    "test": "node --experimental-strip-types --no-warnings --test test/*.test.ts",
+    "test": "bun test",
     "typecheck": "tsc"
   },
   "devDependencies": {
     "@oh-my-pi/pi-coding-agent": "^18.4.4",
+    "@types/bun": "^1.3.0",
     "@types/node": "^22.0.0",
-    "typescript": "^5.9.0"
+    "typescript": "^5.9.0",
+    "zod": "^4.6.5"
   },
   "omp": {
-    "extensions": ["./src/index.ts"],
+    "extensions": [
+      "./src/index.ts"
+    ],
     "settings": {
       "apiKey": {
         "type": "string",
         "secret": true,
         "env": "MCPBYTES_API_KEY",
-        "description": "MCPBytes API key (console.mcpbytes.com, API keys). Without one the plugin stays off."
+        "description": "MCPBytes API key (console.mcpbytes.com, API keys). Without one cloud memory stays off; local history can still run."
       },
       "apiUrl": {
         "type": "string",
@@ -55,6 +71,29 @@
         "default": true,
         "env": "MCPBYTES_MEMORY_RETAIN_NUDGE",
         "description": "After a run of 5 or more tool calls that saved nothing, ask the agent once whether something is worth remembering"
+      },
+      "history": {
+        "type": "boolean",
+        "default": false,
+        "env": "MCPBYTES_MEMORY_HISTORY",
+        "description": "Opt in to local, redacted 30-day activity capture. Messages and tool evidence stay on this machine; no file restoration."
+      },
+      "historyCloudIndex": {
+        "type": "boolean",
+        "default": false,
+        "env": "MCPBYTES_MEMORY_HISTORY_CLOUD_INDEX",
+        "description": "With history enabled, upload compact activity descriptions to MCPBytes for semantic search. Paid writes; raw evidence stays local."
+      },
+      "historyPath": {
+        "type": "string",
+        "env": "MCPBYTES_MEMORY_HISTORY_PATH",
+        "description": "Local SQLite history file. Default: ~/.mcpbytes/omp-history.sqlite. Use a private directory outside monitored roots."
+      },
+      "historyRoots": {
+        "type": "string",
+        "default": "[]",
+        "env": "MCPBYTES_MEMORY_HISTORY_ROOTS",
+        "description": "JSON array of local workspace roots to observe for file appearances/disappearances (metadata only). Empty: tool evidence only."
       }
     }
   }
